@@ -1,0 +1,17 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const R=require('../src/reference.cjs');
+const ref={provider:'baidu',accountId:'1234567890123456789',fileId:'9876543210123456789',kind:'file',path:'/课程/甲 & 乙[新].pdf',name:'甲 & 乙[新].pdf'};
+test('reference URI round-trips large IDs and Unicode paths',()=>assert.deepEqual(R.parseLink(R.linkOf(ref)),R.reference(ref)));
+test('large JSON IDs preserved before parse; quoted numbers untouched',()=>{const x=R.parseJson('{"fs_id":9876543210123456789,"s":"1234567890123456789","n":3,"e":1.5e2}');assert.equal(x.fs_id,ref.fileId);assert.equal(x.s,'1234567890123456789');assert.equal(x.n,3);assert.equal(x.e,150);});
+test('unsafe numeric identity rejected rather than rounded',()=>assert.throws(()=>R.decimalId(9876543210123456789)));
+test('no parent-directory, control character or duplicate-slash paths',()=>{for(const p of ['/a/../b','relative','/a//b','/a\nb'])assert.throws(()=>R.pathOf(p));});
+test('reference parser rejects duplicate, missing, credential and foreign fields',()=>{for(const s of [R.linkOf(ref)+'&id=1',R.linkOf(ref)+'&access_token=secret',R.linkOf(ref).replace('v=1','v=2'),R.linkOf(ref).replace('obsidian:','https:')])assert.throws(()=>R.parseLink(s));});
+test('metadata snapshot cannot carry tokens or hidden fields',()=>{const x=R.reference({...ref,accessToken:'secret',unknown:1});assert.equal(JSON.stringify(x).includes('secret'),false);assert.equal(Object.hasOwn(x,'unknown'),false);});
+test('Markdown text and title escaped without modifying identity',()=>{const md=R.markdownOf({...ref,name:'[x] <img> !',path:'/a/"quoted".pdf'});assert.match(md,/\\\[x\\\]/);assert.match(md,/&lt;img&gt;/);assert.match(md,/&quot;quoted&quot;/);});
+test('dynamic default label changes, custom label remains',()=>{assert.equal(R.displayName(ref.name,ref,'新名称.pdf'),'新名称.pdf');assert.equal(R.displayName('我的教材',ref,'新名称.pdf'),'我的教材');});
+test('file web fallback targets parent; folder fallback targets itself',()=>{assert.ok(R.webLocation(ref).endsWith(encodeURIComponent('/课程')));assert.ok(R.webLocation({...ref,kind:'folder'}).endsWith(encodeURIComponent(ref.path)));});
+test('directory boundary is segment aware',()=>{assert.equal(R.within('/课程2/a','/课程'),false);assert.equal(R.within('/课程/a','/课程'),true);assert.equal(R.within('/课程/sub/a','/课程',false),false);assert.equal(R.within('/a','/'),true);});
+test('synthetic root can only use root path and folder type',()=>{assert.throws(()=>R.reference({...ref,fileId:'0'}));assert.throws(()=>R.reference({...ref,fileId:'0',kind:'folder'}));assert.equal(R.reference({...ref,fileId:'0',kind:'folder',path:'/'}).fileId,'0');});
+test('MediaCore handoff excludes tokens and uses currently-supported web fallback',()=>{const x=R.handoff({type:'work',uid:'work_demo'},[ref]);assert.equal(x.protocol,'media-resource-handoff/v1');assert.equal(x.resources[0].identity.id,ref.fileId);assert.match(x.resources[0].link,/^https:\/\/pan\.baidu\.com/);assert.throws(()=>R.handoff({type:'note',uid:'x'},[ref]));});
+test('invalid JSON and oversized responses rejected',()=>{for(const raw of ['{','{"n":01}','{"n":-}','x'])assert.throws(()=>R.parseJson(raw));assert.throws(()=>R.parseJson(' '.repeat(2*1024*1024+1)));});

@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "channel": "release-candidate",
+  "gates": [
+    {
+      "id": "baidu-live-auth",
+      "status": "not-run",
+      "evidence": ""
+    },
+    {
+      "id": "baidu-live-search",
+      "status": "not-run",
+      "evidence": ""
+    },
+    {
+      "id": "folder-move",
+      "status": "not-run",
+      "evidence": ""
+    },
+    {
+      "id": "obsidian-macos",
+      "status": "not-run",
+      "evidence": ""
+    },
+    {
+      "id": "obsidian-windows",
+      "status": "not-run",
+      "evidence": ""
+    },
+    {
+      "id": "credential-sync",
+      "status": "not-run",
+      "evidence": ""
+    },
+    {
+      "id": "obsidian-performance",
+      "status": "not-run",
+      "evidence": ""
+    }
+  ]
+}
