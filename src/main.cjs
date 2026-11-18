@@ -1,6 +1,7 @@
 'use strict';
 const {Plugin,MarkdownRenderChild,Menu,Notice,EditorSuggest}=require('obsidian');
 const path=require('node:path');
+const {captureInsertion}=require('./insertion.cjs');
 const {JsonTransport}=require('./transport.cjs');
 const {CredentialFiles}=require('./storage.cjs');
 const {OpenListAuth,Credentials}=require('./auth.cjs');
@@ -40,8 +41,8 @@ class SlashSuggest extends EditorSuggest{
   onTrigger(cursor,editor){const line=editor.getLine(cursor.line).slice(0,cursor.ch),m=line.match(/(?:^|\s)(\/(?:网盘|cloud))$/);if(!m)return null;return {start:{line:cursor.line,ch:cursor.ch-m[1].length},end:cursor,query:m[1]};}
   getSuggestions(){return ['选择网盘资源'];}
   renderSuggestion(value,el){el.textContent=value;}
-  selectSuggestion(){const ctx=this.context;if(!ctx)return;const {editor,start,end}=ctx,snapshot=editor.getValue();this.close();this.plugin.pick().then(ref=>{
-    if(!ref)return;if(editor.getValue()!==snapshot){this.plugin.copy(markdownOf(ref)).catch(e=>new Notice(publicError(e)));new Notice('笔记已变化，引用已复制，未改写正文。');return;}editor.replaceRange(markdownOf(ref),start,end);
+  selectSuggestion(){const ctx=this.context;if(!ctx)return;const {editor,start,end,file}=ctx,insert=captureInsertion(this.plugin,editor,file,start,end);this.close();this.plugin.pick().then(async ref=>{
+    if(!ref||this.plugin.closed)return;const md=markdownOf(ref);if(!insert(md)){await this.plugin.copy(md);new Notice('目标笔记已变化或关闭，引用已复制，未改写正文。');}
   }).catch(e=>new Notice(publicError(e)));}
 }
 module.exports=class CloudReference extends Plugin{
@@ -62,9 +63,9 @@ module.exports=class CloudReference extends Plugin{
       open:(ref,options)=>this.open(ref,options),toMarkdown:markdownOf,parseReference:parseLink,
       diagnostics:()=>this.diagnostics(),toMediaCoreHandoff:handoff,registerOpener:opener=>{if(this.closed)fail('unloaded','插件已停用。');return this.service.registerOpener(opener);}});
     this.addSettingTab(new SettingsTab(this));
-    this.addCommand({id:'insert-resource',name:'插入网盘资源',editorCallback:(editor)=>{
-      const snapshot=editor.getValue(),from=editor.getCursor('from'),to=editor.getCursor('to');
-      this.pick().then(ref=>{if(!ref)return;const md=markdownOf(ref);if(editor.getValue()===snapshot)editor.replaceRange(md,from,to);else{this.copy(md).catch(e=>new Notice(publicError(e)));new Notice('笔记已变化，引用已复制，未改写正文。');}}).catch(e=>new Notice(publicError(e)));
+    this.addCommand({id:'insert-resource',name:'插入网盘资源',editorCallback:(editor,context)=>{
+      const insert=captureInsertion(this,editor,context?.file,editor.getCursor('from'),editor.getCursor('to'));
+      this.pick().then(async ref=>{if(!ref||this.closed)return;const md=markdownOf(ref);if(!insert(md)){await this.copy(md);new Notice('目标笔记已变化或关闭，引用已复制，未改写正文。');}}).catch(e=>new Notice(publicError(e)));
     }});
     this.addCommand({id:'browse-cloud',name:'浏览并复制网盘引用',callback:()=>this.pick().then(r=>r&&this.copy(markdownOf(r))).catch(e=>new Notice(publicError(e)))});
     this.addCommand({id:'copy-diagnostics',name:'复制性能诊断（不含敏感信息）',callback:()=>this.copy(JSON.stringify(this.diagnostics(),null,2)).catch(e=>new Notice(publicError(e)))});

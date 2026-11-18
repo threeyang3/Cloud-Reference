@@ -3,7 +3,7 @@ class CloudError extends Error {
   constructor(code, message) { super(message); this.name = 'CloudError'; this.code = code; }
 }
 const fail = (code, message) => { throw new CloudError(code, message); };
-const text = (value, max = 4096) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
+const text = (value, max = 4096) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value);
 function decimalId(value, root = false) {
   if (typeof value === 'number') {
     if (!Number.isSafeInteger(value)) fail('protocol', '网盘身份精度不可靠。');
@@ -59,24 +59,39 @@ function handoff(target, resources) {
     return {kind:r.kind,provider:r.provider,title:r.name,identity:{scope:r.accountId,id:r.fileId},link:webLocation(r),location:r.path};
   })};
 }
-/** Preserve large integers before JSON.parse. Never round file IDs through Number. */
+/** Preserve unsafe integer literals without allocating an array per character. */
 function parseJson(raw) {
   if (typeof raw !== 'string' || raw.length > 2 * 1024 * 1024) fail('protocol', '响应过大。');
-  const parts = []; let i = 0;
+  const parts = [], number = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+  let i = 0, start = 0;
   while (i < raw.length) {
-    const c = raw[i];
-    if (c === '"') {
-      const start = i++;
-      while (i < raw.length) { if (raw[i] === '\\') { i += 2; continue; } if (raw[i++] === '"') break; }
-      parts.push(raw.slice(start, i));
-    } else if (c === '-' || /[0-9]/.test(c)) {
-      const m = raw.slice(i).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
-      if (!m) fail('protocol', '响应 JSON 无效。');
-      const token = m[0]; i += token.length;
-      parts.push(/^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token)) ? `"${token}"` : token);
-    } else { parts.push(c); i++; }
+    const c = raw.charCodeAt(i);
+    if (c === 34) {
+      i++;
+      while (i < raw.length) {
+        if (raw.charCodeAt(i) === 92) { i += 2; continue; }
+        if (raw.charCodeAt(i++) === 34) break;
+      }
+    } else if (c === 45 || (c >= 48 && c <= 57)) {
+      number.lastIndex = i;
+      const match = number.exec(raw);
+      if (!match) fail('protocol', '响应 JSON 无效。');
+      const literal = match[0];
+      if (/^-?\d+$/.test(literal) && !Number.isSafeInteger(Number(literal))) {
+        parts.push(raw.slice(start, i), '"', literal, '"');
+        start = i + literal.length;
+      }
+      i += literal.length;
+    } else i++;
   }
-  try { return JSON.parse(parts.join('')); } catch { fail('protocol', '响应 JSON 无效。'); }
+  try { return JSON.parse(parts.length ? parts.join('') + raw.slice(start) : raw); }
+  catch { fail('protocol', '响应 JSON 无效。'); }
+}
+function parseJsonBytes(bytes) {
+  let raw;
+  try { raw = new (require('node:util').TextDecoder)('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes); }
+  catch { fail('protocol', '响应不是有效 UTF-8，未替换损坏的文件名或路径。'); }
+  return parseJson(raw);
 }
 function publicError(e) { return e instanceof CloudError ? e.message : e?.name === 'AbortError' ? '操作已取消。' : '操作失败，请重试。'; }
-module.exports = {CloudError,fail,text,decimalId,pathOf,parentPath,within,reference,keyOf,linkOf,parseLink,markdownOf,displayName,webLocation,handoff,parseJson,publicError};
+module.exports = {CloudError,fail,text,decimalId,pathOf,parentPath,within,reference,keyOf,linkOf,parseLink,markdownOf,displayName,webLocation,handoff,parseJson,parseJsonBytes,publicError};

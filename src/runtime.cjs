@@ -4,7 +4,11 @@ const aborted = () => new CloudError('cancelled','操作已取消。');
 function check(signal) { if (signal?.aborted) throw aborted(); }
 function waitFor(promise, signal) {
   if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(aborted());
+  if (signal.aborted) {
+    // Observe an already-started operation even when its consumer is cancelled.
+    Promise.resolve(promise).catch(() => {});
+    return Promise.reject(aborted());
+  }
   return new Promise((resolve,reject) => {
     const cleanup = () => signal.removeEventListener('abort',abort);
     const abort = () => { cleanup(); reject(aborted()); };
@@ -40,13 +44,17 @@ class MetadataCache {
     if(!entry){
       if(this.pending.size>=64)return Promise.reject(new CloudError('busy','元数据请求过多，请稍后重试。'));
       this.loads++;entry={controller:new AbortController(),waiters:0};const current=entry;
-      entry.promise=Promise.resolve().then(()=>{check(current.controller.signal);return loader(current.controller.signal);}).then(value=>{
+      const work=Promise.resolve().then(()=>{check(current.controller.signal);return loader(current.controller.signal);}).then(value=>{
         check(current.controller.signal);if(this.closed)throw aborted();
         if(!this.closed&&this.pending.get(key)===current&&!current.controller.signal.aborted){
           this.values.set(key,{value:{...value},until:this.now()+this.ttl});
           while(this.values.size>this.limit)this.values.delete(this.values.keys().next().value);
         }return value;
-      }).finally(()=>{if(this.pending.get(key)===current)this.pending.delete(key);});this.pending.set(key,entry);
+      });
+      // Release subscribers on invalidation/unload even if a custom loader does
+      // not honour AbortSignal. Its late completion still cannot fill the cache.
+      entry.promise=waitFor(work,current.controller.signal).finally(()=>{if(this.pending.get(key)===current)this.pending.delete(key);});
+      this.pending.set(key,entry);
     }
     if(entry.waiters>0)this.merged++;
     entry.waiters++;
@@ -54,6 +62,9 @@ class MetadataCache {
       entry.waiters--;if(entry.waiters===0&&this.pending.get(key)===entry){this.pending.delete(key);entry.controller.abort();}
     });
   }
+  // A fresh foreground read bypasses a saved value but joins a live request.
+  // Reserve invalidate() for identity/account changes that really cancel work.
+  evict(key){this.values.delete(key);}
   invalidate(key){this.values.delete(key);const e=this.pending.get(key);if(e){this.pending.delete(key);e.controller.abort();}}
   diagnostics(){return {entries:this.values.size,pending:this.pending.size,hits:this.hits,loads:this.loads,merged:this.merged};}
   clear(){this.values.clear();for(const e of this.pending.values())e.controller.abort();this.pending.clear();}

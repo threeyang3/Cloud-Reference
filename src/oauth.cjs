@@ -1,6 +1,6 @@
 'use strict';
 const {randomBytes, timingSafeEqual} = require('node:crypto');
-const {CloudError, fail, text, parseJson} = require('./reference.cjs');
+const {CloudError, fail, text, parseJsonBytes} = require('./reference.cjs');
 const {check, aborted} = require('./runtime.cjs');
 const ORIGIN = 'https://api.oplist.org';
 const CALLBACK = ORIGIN + '/baiduyun/callback';
@@ -43,7 +43,7 @@ function callbackPair(location, now = Date.now()) {
   if (u.origin !== ORIGIN || u.pathname !== '/' || u.search || !u.hash || u.hash.length > 32769) fail('oauth', '授权结果来源不匹配。');
   const encoded = u.hash.slice(1);
   if (!/^[A-Za-z0-9+/_=-]+$/.test(encoded)) fail('oauth', '授权结果编码无效。');
-  const payload = parseJson(Buffer.from(encoded, 'base64').toString('utf8'));
+  const payload = parseJsonBytes(Buffer.from(encoded, 'base64'));
   if (!payload || payload.driver_txt !== 'baiduyun_go' || payload.client_key || payload.secret_key || payload.message_err) fail('oauth', '授权服务未返回可用的内置应用凭据。');
   // APIPages callback currently omits expiry. Do not invent an expiry time.
   const valid = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[^\x21-\x7e]/.test(value);
@@ -67,11 +67,22 @@ async function authorize(auth, {signal, bridgeFactory = nativeBridge, timeout = 
   check(signal);
   const code = await new Promise((resolve, reject) => {
     let win, session, timer, done = false;
+    const denyDownload = event => event.preventDefault();
+    const denyWebview = event => event.preventDefault();
     const cleanup = () => {
       clearTimeout(timer); signal?.removeEventListener('abort', cancel);
-      try { if (win && !win.isDestroyed()) win.destroy(); } catch { /* Already closed. */ }
+      try {
+        win?.removeListener('closed', cancel);
+        win?.webContents?.removeListener('will-attach-webview', denyWebview);
+        if (win && !win.isDestroyed()) win.destroy();
+      } catch { /* Already closed. */ }
       if (session) {
-        try { session.webRequest.onBeforeRequest(null); } catch { /* Host teardown. */ }
+        try {
+          session.removeListener('will-download', denyDownload);
+          session.setPermissionRequestHandler(null);
+          session.setPermissionCheckHandler(null);
+          session.webRequest.onBeforeRequest(null);
+        } catch { /* Host teardown. */ }
         try { Promise.resolve(session.clearStorageData()).catch(() => {}); } catch { /* Ephemeral session. */ }
       }
     };
@@ -81,7 +92,7 @@ async function authorize(auth, {signal, bridgeFactory = nativeBridge, timeout = 
       session = bridge.session.fromPartition('cloud-reference-auth-' + randomBytes(16).toString('hex'), {cache: false});
       session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
       session.setPermissionCheckHandler(() => false);
-      session.on('will-download', event => event.preventDefault());
+      session.on('will-download', denyDownload);
       session.webRequest.onBeforeRequest({urls: ['<all_urls>']}, (details, acknowledge) => {
         let acknowledged = false;
         const callback = value => { if (!acknowledged) { acknowledged = true; acknowledge(value); } };
@@ -107,7 +118,7 @@ async function authorize(auth, {signal, bridgeFactory = nativeBridge, timeout = 
         webPreferences: {session, sandbox: true, contextIsolation: true, nodeIntegration: false, nodeIntegrationInWorker: false,
           nodeIntegrationInSubFrames: false, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, devTools: false}});
       win.webContents.setWindowOpenHandler(() => ({action: 'deny'}));
-      win.webContents.on('will-attach-webview', event => event.preventDefault());
+      win.webContents.on('will-attach-webview', denyWebview);
       win.on('closed', cancel);
       signal?.addEventListener('abort', cancel, {once: true});
       timer = setTimeout(() => finish(new CloudError('timeout', '授权窗口已超时，请重新开始。')), timeout);

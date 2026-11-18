@@ -1,11 +1,11 @@
 'use strict';
 const fs = require('node:fs/promises'), constants = require('node:fs').constants;
 const path = require('node:path'), {randomUUID} = require('node:crypto');
-const {decimalId, CloudError, parseJson} = require('./reference.cjs');
+const {decimalId, CloudError, parseJsonBytes} = require('./reference.cjs');
 /** Plaintext sync mode requires explicit UI consent. Never commit these files. */
 class CredentialFiles {
-  constructor(directory, {trustedRoot = path.dirname(directory)} = {}) {
-    this.directory = path.resolve(directory); this.trustedRoot = path.resolve(trustedRoot); this.invalidCount = 0;
+  constructor(directory, {trustedRoot = path.dirname(directory), rename = fs.rename} = {}) {
+    this.directory = path.resolve(directory); this.trustedRoot = path.resolve(trustedRoot); this.invalidCount = 0; this.rename = rename;
     this.relative = path.relative(this.trustedRoot, this.directory);
     if (!this.relative || this.relative.startsWith('..') || path.isAbsolute(this.relative)) throw new CloudError('storage', '凭据目录必须位于指定库目录内。');
   }
@@ -37,7 +37,7 @@ class CredentialFiles {
       if (!stat.isFile() || stat.size > 32768 || stat.ino !== initial.ino || stat.dev !== initial.dev) throw new CloudError('storage', '凭据文件在读取时发生变化。');
       const buffer = Buffer.alloc(32769); let offset = 0;
       for (;;) { const {bytesRead} = await handle.read(buffer, offset, buffer.length - offset, offset); if (!bytesRead) break; offset += bytesRead; if (offset > 32768) throw new CloudError('storage', '凭据文件过大。'); }
-      return parseJson(buffer.subarray(0, offset).toString('utf8'));
+      return parseJsonBytes(buffer.subarray(0, offset));
     } catch (error) {
       if (error.code === 'ENOENT') return null;
       if (error instanceof CloudError) throw error;
@@ -53,8 +53,16 @@ class CredentialFiles {
       const content = JSON.stringify(record);
       if (Buffer.byteLength(content) > 32768) throw new CloudError('storage', '凭据文件过大。');
       handle = await fs.open(temp, 'wx', 0o600); await handle.writeFile(content); await handle.sync(); await handle.close(); handle = null;
-      await this.guard(); beforeCommit?.();
-      await fs.rename(temp, dest);
+      // Antivirus or a sync client may briefly hold the destination on Windows.
+      // Retry only local replacement, never a token request; never unlink dest.
+      for (let attempt = 0; ; attempt++) {
+        await this.guard(); await beforeCommit?.();
+        try { await this.rename(temp, dest); break; }
+        catch (error) {
+          if (attempt >= 2 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+        }
+      }
     } catch (error) {
       if (error instanceof CloudError) throw error;
       throw new CloudError('storage', '凭据写入失败；未确认更新成功。');

@@ -1,6 +1,6 @@
 'use strict';
 const https = require('node:https');
-const {CloudError, parseJson} = require('./reference.cjs');
+const {CloudError, parseJsonBytes} = require('./reference.cjs');
 const {RequestGate, check, aborted} = require('./runtime.cjs');
 const BROKERS = Object.freeze({openlist: 'https://api.oplist.org'});
 
@@ -44,11 +44,19 @@ class JsonTransport {
     }
     return new Promise((resolve, reject) => {
       let req, timer, done = false, dispatched = false, preparing = false;
+      let preparationComplete = false, deferredSettlement;
       const finish = (error, value) => {
         if (done) return;
         done = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
         this.controllers.delete(abort); if (req) this.requests.delete(req);
-        if (error) { error.delivery ||= dispatched ? 'unknown' : 'not-sent'; reject(error); } else resolve(value);
+        const settle = () => {
+          if (error) { error.delivery ||= dispatched ? 'unknown' : 'not-sent'; reject(error); } else resolve(value);
+        };
+        // A timeout/cancel can race an asynchronous recovery-marker write. Wait
+        // for that hook to finish before telling Credentials whether to roll it
+        // back. The request is already stopped and will never be dispatched.
+        if (preparing && !preparationComplete) deferredSettlement = settle;
+        else settle();
       };
       const abort = () => { finish(aborted()); req?.destroy(); };
       const dispatch = async () => {
@@ -64,6 +72,10 @@ class JsonTransport {
         } catch (error) {
           finish(error instanceof CloudError ? error : new CloudError('storage', '请求准备失败。'));
           req?.destroy();
+        } finally {
+          preparationComplete = true;
+          const settle = deferredSettlement; deferredSettlement = undefined;
+          settle?.();
         }
       };
       this.controllers.add(abort);
@@ -73,6 +85,11 @@ class JsonTransport {
         // APIPages callback reads these fixed, non-secret selection cookies.
         if (mode === 'oauth-redirect') headers.Cookie = 'server_use=true; driver_txt=baiduyun_go';
         req = this.request(url, {method, headers}, response => {
+          // Observe errors on every status, including redirects/rejections.
+          response.on('error', () => finish(new CloudError('network', '网盘响应中断。')));
+          response.on('aborted', () => finish(new CloudError('network', '网盘响应中断。')));
+          response.on('close', () => { if (!done) finish(new CloudError('network', '网盘响应未完整结束。')); });
+          if (done) { response.destroy(); return; }
           const status = response.statusCode || 0;
           if (mode === 'oauth-redirect' && [302, 303].includes(status)) {
             const location = response.headers.location;
@@ -99,10 +116,7 @@ class JsonTransport {
             if (size > this.maxBytes) { finish(new CloudError('limit', '响应超过大小上限。')); response.destroy(); }
             else chunks.push(bytes);
           });
-          response.on('end', () => { if (!done) { try { finish(null, parseJson(Buffer.concat(chunks).toString('utf8'))); } catch (e) { finish(e); } } });
-          response.on('error', () => finish(new CloudError('network', '网盘响应中断。')));
-          response.on('aborted', () => finish(new CloudError('network', '网盘响应中断。')));
-          response.on('close', () => { if (!done) finish(new CloudError('network', '网盘响应未完整结束。')); });
+          response.on('end', () => { if (!done) { try { finish(null, parseJsonBytes(Buffer.concat(chunks))); } catch (e) { finish(e); } } });
         });
         this.requests.add(req); this.count++;
         req.on('error', () => finish(new CloudError('network', '无法连接网盘服务。')));

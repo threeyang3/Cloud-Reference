@@ -2,6 +2,11 @@
 const fs = require('node:fs'), path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const acceptance = JSON.parse(fs.readFileSync(path.join(root, 'docs/acceptance.json'), 'utf8'));
+const version = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8')).version;
+if (acceptance.version !== version) {
+  console.error('Stable promotion blocked. Evidence version does not match plugin version.');
+  process.exit(1);
+}
 const required = ['baidu-live-auth', 'baidu-live-search', 'folder-move', 'obsidian-macos', 'obsidian-windows', 'credential-sync', 'obsidian-performance'];
 const missing = required.filter(id => {
   const gate = acceptance.gates.find(item => item.id === id);

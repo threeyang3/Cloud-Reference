@@ -54,11 +54,24 @@ class Credentials {
     if (!record) fail('unauthorized', '此账号尚未授权，或凭据还未同步。');
     return validateRecord(record, id);
   }
-  async write(record, persistent, signal) {
-    const beforeCommit = () => { check(this.lifetime.signal); check(signal); };
-    beforeCommit();
+  async write(record, persistent, signal, expected) {
+    const assertActive = () => { check(this.lifetime.signal); check(signal); };
+    const beforeCommit = async () => {
+      assertActive();
+      if (expected) {
+        // Re-read at the actual rename boundary, not just before preparing a
+        // temporary file. This narrows (but cannot eliminate) cloud-sync races.
+        const latest = persistent ? await this.storage.read(record.accountId) : this.sessions.get(record.accountId);
+        assertActive();
+        if (!latest || latest.revision !== expected.revision ||
+            (latest.pending ?? null) !== (expected.pending ?? null)) {
+          fail('conflict', '凭据在保存期间已变化，未覆盖同步设备的新结果。');
+        }
+      }
+    };
+    assertActive();
     if (persistent) await this.storage.write(record.accountId, record, {beforeCommit});
-    else this.sessions.set(record.accountId, {...record});
+    else { await beforeCommit(); this.sessions.set(record.accountId, {...record}); }
   }
   async install(identity, pair, profile, persistent, signal) {
     check(signal); check(this.lifetime.signal);
@@ -121,7 +134,7 @@ class Credentials {
     const prepare = async () => {
       const before = await this.load(id);
       if (before.revision !== current.revision || before.pending) fail('conflict', '凭据已变化，未发送旧令牌。');
-      await this.write({...current, pending: attempt}, persistent); marked = true;
+      await this.write({...current, pending: attempt}, persistent, undefined, current); marked = true;
       const saved = await this.load(id);
       if (saved.revision !== current.revision || saved.pending !== attempt) fail('conflict', '凭据同步冲突，未执行续期。');
     };
@@ -134,7 +147,7 @@ class Credentials {
       // Unknown responses, shutdown, revocation and write failures stay fail-closed.
       if (marked && error?.delivery === 'not-sent' && !this.lifetime.signal.aborted) {
         const latest = await this.load(id);
-        if (latest.revision === current.revision && latest.pending === attempt) await this.write(current, persistent);
+        if (latest.revision === current.revision && latest.pending === attempt) await this.write(current, persistent, undefined, {...current, pending: attempt});
       }
       throw error;
     }
@@ -143,7 +156,7 @@ class Credentials {
     if (!marked || latest.revision !== current.revision || latest.pending !== attempt) fail('conflict', '凭据同步冲突，未覆盖其他设备的结果。');
     const next = validateRecord({v: 1, accountId: id, label: current.label, profile: current.profile,
       revision: this.makeId(), ...pairOf(pair)}, id);
-    await this.write(next, persistent); return next;
+    await this.write(next, persistent, undefined, {...current, pending: attempt}); return next;
   }
   async remove(id) {
     id = decimalId(id); check(this.lifetime.signal);

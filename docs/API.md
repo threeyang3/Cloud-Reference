@@ -10,7 +10,7 @@
 | `pickResource({folder?,signal?})` | 打开快速引用窗口，取消返回 null |
 | `browse(folder,{offset?,signal?})` | 重新解析目录身份，返回一页列表 |
 | `search(folder,query,{offset?,signal?})` | 服务端当前目录与子目录关键词搜索，不超过 30 个字符 |
-| `resolve(ref,{fresh?,signal?})` | 解析当前元数据，默认有界内存缓存；fresh 使旧请求失效 |
+| `resolve(ref,{fresh?,signal?})` | 解析当前元数据，默认有界内存缓存；fresh 跳过已完成缓存，但合并同身份的在途读取，不取消其他消费者 |
 | `open(ref,{opener?,signal?})` | 文件按默认打开器，文件夹打开轻量浏览窗口 |
 | `toMarkdown(ref,label?)` | 普通 Markdown，保留原名称/路径快照 |
 | `parseReference(uri)` | 严格解析版本、账号、文件/目录身份，无网络 |
