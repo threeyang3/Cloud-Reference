@@ -1,0 +1,9 @@
+{
+  "id": "cloud-reference",
+  "name": "Cloud Reference",
+  "version": "0.2.2",
+  "minAppVersion": "1.5.0",
+  "description": "按需浏览、搜索和引用网盘资源，不扫描或同步整个库。",
+  "author": "threeyang3",
+  "isDesktopOnly": true
+}

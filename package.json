@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-cloud-reference",
+  "version": "0.2.2",
+  "private": true,
+  "description": "On-demand cloud file references for Obsidian",
+  "scripts": {
+    "test": "node scripts/test.cjs",
+    "build": "node scripts/build.cjs",
+    "check": "node scripts/check.cjs && npm test && npm run build && npm run bench",
+    "bench": "node --expose-gc scripts/performance.cjs",
+    "release-check": "node scripts/release-check.cjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
