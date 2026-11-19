@@ -1,5 +1,6 @@
 'use strict';
-const {Plugin,MarkdownRenderChild,Menu,Notice,EditorSuggest}=require('obsidian');
+const {Plugin,Menu,Notice,EditorSuggest}=require('obsidian');
+const {LinkChild}=require('./link-view.cjs');
 const path=require('node:path');
 const {captureInsertion}=require('./insertion.cjs');
 const {JsonTransport}=require('./transport.cjs');
@@ -7,35 +8,9 @@ const {CredentialFiles}=require('./storage.cjs');
 const {OpenListAuth,Credentials}=require('./auth.cjs');
 const {BaiduProvider}=require('./baidu.cjs');
 const {CloudService}=require('./service.cjs');
-const {reference,keyOf,parseLink,linkOf,markdownOf,displayName,webLocation,handoff,publicError,fail}=require('./reference.cjs');
+const {reference,parseLink,markdownOf,webLocation,handoff,publicError,fail}=require('./reference.cjs');
 const {check,waitFor,NameScheduler}=require('./runtime.cjs');
 const {AuthModal,Picker,SettingsTab}=require('./ui.cjs');
-class LinkChild extends MarkdownRenderChild{
-  constructor(element,plugin){super(element);this.plugin=plugin;this.life=new AbortController();this.listeners=[];this.plugin.renderChildren.add(this);}
-  onload(){
-    const links=[...this.containerEl.querySelectorAll('a[href^="obsidian://cloud-reference?"]')];if(!links.length)return;
-    const refresh=(a,priority=false)=>{const ref=a._cloudRef;if(!ref)return;const load=signal=>this.plugin.resolve(ref,{signal});
-      (priority?load(this.life.signal):this.plugin.names.get(keyOf(ref),load,this.life.signal)).then(current=>{
-      if(this.life.signal.aborted||!a.isConnected)return;
-      if(!a.childElementCount)a.textContent=displayName(a._cloudLabel,ref,current.name);
-      a.title=current.path;
-    }).catch(e=>{if(e?.code==='busy')return;if(!this.life.signal.aborted)a.title=`${ref.path} · ${publicError(e)}`;});};
-    const View=this.containerEl.ownerDocument.defaultView;
-    if(this.plugin.settings.dynamicNames&&View?.IntersectionObserver)this.observer=new View.IntersectionObserver(entries=>{
-      for(const entry of entries)if(entry.isIntersecting){this.observer.unobserve(entry.target);refresh(entry.target);}
-    },{rootMargin:'0px',threshold:0});
-    for(const a of links){
-      try{a._cloudRef=parseLink(a.getAttribute('href'));}catch{continue;}
-      a._cloudLabel=a.textContent;a.classList.add('cr-link');
-      const click=e=>{e.preventDefault();e.stopPropagation();this.plugin.open(a._cloudRef).catch(err=>new Notice(publicError(err)));};
-      const menu=e=>{e.preventDefault();e.stopPropagation();this.plugin.menu(a._cloudRef,e);};
-      const hover=()=>{if(this.plugin.settings.dynamicNames)refresh(a,true);};
-      for(const [type,fn]of [['click',click],['contextmenu',menu],['mouseenter',hover]]){a.addEventListener(type,fn);this.listeners.push(()=>a.removeEventListener(type,fn));}
-      this.observer?.observe(a);
-    }
-  }
-  onunload(){this.plugin.renderChildren.delete(this);this.life.abort();this.observer?.disconnect();for(const f of this.listeners)f();this.listeners=[];}
-}
 class SlashSuggest extends EditorSuggest{
   constructor(plugin){super(plugin.app);this.plugin=plugin;}
   onTrigger(cursor,editor){const line=editor.getLine(cursor.line).slice(0,cursor.ch),m=line.match(/(?:^|\s)(\/(?:网盘|cloud))$/);if(!m)return null;return {start:{line:cursor.line,ch:cursor.ch-m[1].length},end:cursor,query:m[1]};}
@@ -47,8 +22,12 @@ class SlashSuggest extends EditorSuggest{
 }
 module.exports=class CloudReference extends Plugin{
   async onload(){
-    this.closed=false;this.modals=new Set();this.operations=new Set();this.renderChildren=new Set();
-    const saved=await this.loadData();this.settings={dynamicNames:saved?.dynamicNames!==false,openers:{}};
+    this.closed=false;this.ready=false;this.modals=new Set();this.operations=new Set();this.renderChildren=new Set();this.linkOwners=new WeakMap();
+    const epoch={};this.loadEpoch=epoch;
+    try {
+    const saved=await this.loadData();
+    if(this.closed||this.loadEpoch!==epoch)return;
+    this.settings={dynamicNames:saved?.dynamicNames!==false,openers:Object.create(null)};
     if(saved?.openers&&typeof saved.openers==='object'&&!Array.isArray(saved.openers))for(const [k,v]of Object.entries(saved.openers).slice(0,64))if(/^[a-z0-9]{1,12}$/.test(k)&&typeof v==='string'&&/^[a-z][a-z0-9-]{0,63}$/.test(v))this.settings.openers[k]=v;
     const base=this.app.vault.adapter.getBasePath?.();if(!base)fail('platform','当前版本仅支持桌面本地 Vault。');
     const pluginDir=this.manifest.dir||`${this.app.vault.configDir}/plugins/${this.manifest.id}`;
@@ -75,7 +54,8 @@ module.exports=class CloudReference extends Plugin{
     this.registerObsidianProtocolHandler('cloud-reference',params=>{
       try{const p=new URLSearchParams();for(const k of ['v','provider','account','id','kind','path','name'])if(typeof params[k]==='string')p.set(k,params[k]);const r=parseLink('obsidian://cloud-reference?'+p);this.open(r).catch(e=>new Notice(publicError(e)));}catch(e){new Notice(publicError(e));}
     });
-    this.app.workspace.trigger('cloud-reference:ready',this.api);
+    this.ready=true;this.app.workspace.trigger('cloud-reference:ready',this.api);
+    } catch(error){if(this.loadEpoch===epoch)this.onunload();throw error;}
   }
   async operation(signal,fn){
     if(this.closed)fail('unloaded','插件已停用。');check(signal);const controller=new AbortController(),abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});this.operations.add(controller);
@@ -91,9 +71,12 @@ module.exports=class CloudReference extends Plugin{
     const ref=typeof input==='string'?parseLink(input):reference(input);
     if(ref.kind==='folder'&&!options.opener){const picked=await this.pick({folder:ref,signal:options.signal,intent:'browse'});if(picked)await this.open(picked,options);return;}
     return this.operation(options.signal,async signal=>{
-      const ext=ref.name.split('.').pop().toLowerCase(),opener=options.opener||this.settings.openers[ext]||'web';
-      if(opener!=='web')return this.service.openWith(opener,ref,{signal});
-      const current=await this.service.resolve(ref,{signal,fresh:true});check(signal);new Notice('请确认浏览器登录的是此资源所属的百度账号。');return this.external(webLocation(current));
+      if(options.opener&&options.opener!=='web')return this.service.openWith(options.opener,ref,{signal});
+      const current=await this.service.resolve(ref,{signal,fresh:true});check(signal);
+      const ext=current.name.includes('.')?current.name.split('.').pop().toLowerCase():'';
+      const opener=options.opener||(Object.hasOwn(this.settings.openers,ext)?this.settings.openers[ext]:'web');
+      if(opener!=='web')return this.service.openResolvedWith(opener,current,{signal});
+      new Notice('请确认浏览器登录的是此资源所属的百度账号。');return this.external(webLocation(current));
     });
   }
   async authorize(options={}){
@@ -112,8 +95,19 @@ module.exports=class CloudReference extends Plugin{
     action('复制保存的路径',()=>this.copy(ref.path));
     action('打开保存路径（未核验，可能已失效）',()=>this.external(webLocation(ref)));
     action('重新选择并复制替代引用',async()=>{const next=await this.pick();if(next){if(next.accountId!==ref.accountId||next.kind!==ref.kind)fail('identity','替代资源必须属于同一账号且类型一致。');await this.copy(markdownOf(next));new Notice('替代引用已复制。原 Markdown 未修改，请人工替换。');}});
-    for(const opener of this.service.openers.values()){try{if(opener.canOpen(ref))action(`使用 ${opener.label||opener.id}`,()=>this.open(ref,{opener:opener.id}));}catch{/* A broken external opener must not break basic actions. */}}
+    for(const opener of this.service.openers.values()){try{if(this.service.supportsOpener(opener,ref))action(`使用 ${opener.label||opener.id}`,()=>this.open(ref,{opener:opener.id}));}catch{/* A broken external opener must not break basic actions. */}}
     menu.showAtMouseEvent(event);
   }
-  onunload(){this.closed=true;for(const child of [...(this.renderChildren||[])])child.unload();for(const modal of [...(this.modals||[])])modal.close();for(const controller of this.operations||[])controller.abort();this.credentials?.close();this.names?.close();this.service?.close();this.transport?.close();this.api=undefined;this.app.workspace.trigger('cloud-reference:unloaded');}
+  onunload(){
+    if(this.closed)return;
+    this.closed=true;this.loadEpoch=null;this.api=undefined;
+    // One misbehaving view must never prevent credentials/network teardown.
+    const safely=fn=>{try{fn();}catch{this.cleanupErrors=(this.cleanupErrors||0)+1;}};
+    for(const child of [...(this.renderChildren||[])])safely(()=>child.unload());
+    for(const modal of [...(this.modals||[])])safely(()=>modal.close());
+    for(const controller of this.operations||[])safely(()=>controller.abort());
+    for(const resource of [this.credentials,this.names,this.service,this.transport])safely(()=>resource?.close());
+    this.modals?.clear();this.renderChildren?.clear();this.operations?.clear();
+    if(this.ready){this.ready=false;safely(()=>this.app.workspace.trigger('cloud-reference:unloaded'));}
+  }
 };

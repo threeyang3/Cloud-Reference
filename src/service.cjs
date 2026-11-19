@@ -7,7 +7,29 @@ class CloudService{
   async browse(input,options={}){const folder=await this.resolve(input,{...options,fresh:true});check(options.signal);if(folder.kind!=='folder')fail('invalid','资源不是目录。');return {...await this.provider.list(folder,options),folder};}
   async search(input,query,options={}){const folder=await this.resolve(input,{...options,fresh:true});check(options.signal);return {...await this.provider.search(folder,query,options),folder};}
   registerOpener(o){if(this.closed)fail('unloaded','插件已停用。');if(!o||o.id==='web'||!/^[a-z][a-z0-9-]{0,63}$/.test(o.id||'')||typeof o.canOpen!=='function'||typeof o.open!=='function'||this.openers.has(o.id))fail('invalid','打开器无效或重复。');const item=Object.freeze({...o});this.openers.set(item.id,item);return ()=>{if(this.openers.get(item.id)===item)this.openers.delete(item.id);};}
-  async openWith(id,input,{signal}={}){const opener=this.openers.get(id);if(!opener)fail('opener','打开器未安装或已停用。');const current=await this.resolve(input,{signal,fresh:true});check(signal);if(this.closed||this.openers.get(id)!==opener)fail('opener','打开器已经停用。');if(!opener.canOpen(current))fail('opener','打开器不支持此资源。');return opener.open(reference(current),{signal});}
+  async openWith(id,input,{signal}={}){
+    const opener=this.openers.get(id);if(!opener)fail('opener','打开器未安装或已停用。');
+    const current=await this.resolve(input,{signal,fresh:true});
+    return this.openResolvedWith(id,current,{signal,expected:opener});
+  }
+  // Internal only: use a just-resolved resource without a second metadata call.
+  openResolvedWith(id,input,{signal,expected=this.openers.get(id)}={}){
+    check(signal);
+    if(this.closed||!expected||this.openers.get(id)!==expected)fail('opener','打开器已经停用。');
+    const current=reference(input);
+    if(!this.supportsOpener(expected,current))fail('opener','打开器不支持此资源。');
+    check(signal);
+    if(this.closed||this.openers.get(id)!==expected)fail('opener','打开器已经停用。');
+    return expected.open(current,{signal});
+  }
+  supportsOpener(opener,input){
+    const supported=opener.canOpen(reference(input));
+    if(supported&&typeof supported.then==='function'){
+      Promise.resolve(supported).catch(()=>{});
+      fail('opener','打开器能力检查必须同步返回布尔值。');
+    }
+    return supported===true;
+  }
   close(){this.closed=true;this.cache.close();this.openers.clear();}
 }
 module.exports={CloudService};
