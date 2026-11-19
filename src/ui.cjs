@@ -1,7 +1,8 @@
 'use strict';
-const {Modal, PluginSettingTab, Setting, Notice} = require('obsidian');
+const {Modal, PluginSettingTab, Setting, Notice, setIcon} = require('obsidian');
 const {reference, markdownOf, publicError, fail} = require('./reference.cjs');
 const {check} = require('./runtime.cjs');
+const {BAIDU_CLIENT, supportsBaiduClient} = require('./native.cjs');
 function el(parent, tag, text, attrs = {}) {
   const e = parent.ownerDocument.createElement(tag);
   if (text !== undefined) e.textContent = text;
@@ -23,8 +24,15 @@ class TrackedModal extends Modal {
   onClose() { this.life.abort(); this.plugin.modals.delete(this); this.contentEl.replaceChildren(); }
 }
 class AuthModal extends TrackedModal {
+  constructor(plugin, {account = null, onSaved} = {}) {
+    super(plugin);
+    this.account = account;
+    this.onSaved = onSaved;
+  }
   onOpen() {
-    const c = this.contentEl; c.classList.add('cr-modal'); el(c, 'h2', '连接百度网盘');
+    const c = this.contentEl; c.classList.add('cr-modal');
+    el(c, 'h2', this.account ? '重新授权百度网盘' : '连接百度网盘');
+    if (this.account) el(c, 'p', `请授权原账号 ${this.account.label}。`);
     el(c, 'p', '登录在隔离的百度官方页面进行。OpenList 负责授权码交换与令牌续期，能够接触授权凭据；文件请求直接发送给百度。不依赖漫笺。');
     this.status = el(c, 'p', '', {role: 'status', 'aria-live': 'polite'});
     this.login = button(c, '开始官方网页授权', () => this.obtain(() => this.plugin.authorize({signal: this.life.signal})));
@@ -38,18 +46,23 @@ class AuthModal extends TrackedModal {
       return this.plugin.auth.renew(value, this.life.signal);
     }));
     this.retry = button(c, '重试验证已取得的授权', () => this.verifyCandidate()); this.retry.disabled = true;
-    const label = el(c, 'label', undefined, {class: 'cr-consent'});
-    this.persist = el(label, 'input', undefined, {type: 'checkbox'});
-    el(label, 'span', '允许将明文凭据保存在 Vault，随坚果云同步；持有 Vault 副本的人可能访问我的网盘。');
-    el(c, 'p', '不勾选仅保留本次会话。同步不等于加密，也不能保证多设备续期无冲突。授权范围以百度页面为准；本版不调用网盘写入接口。', {class: 'cr-muted'});
-    this.save = button(c, '确认账号并保存', async () => {
+    if (this.account) {
+      el(c, 'p', this.account.persistent ? '新凭据将以明文替换此库中原有的凭据，并可随库同步。持有库副本的人可能访问这个账号。' : '新的授权仅保留在本次会话。', {class: 'cr-muted'});
+    } else {
+      const label = el(c, 'label', undefined, {class: 'cr-consent'});
+      this.persist = el(label, 'input', undefined, {type: 'checkbox'});
+      el(label, 'span', '允许将明文凭据保存在 Vault，随坚果云同步；持有 Vault 副本的人可能访问我的网盘。');
+      el(c, 'p', '不勾选仅保留本次会话。同步不等于加密，也不能保证多设备续期无冲突。授权范围以百度页面为准；本版不调用网盘写入接口。', {class: 'cr-muted'});
+    }
+    this.save = button(c, this.account ? '确认并更新授权' : '确认账号并保存', async () => {
       if (!this.candidate?.identity || this.busy) return;
       this.busy = true; this.controls();
       try {
         const {identity, pair} = this.candidate;
-        await this.plugin.credentials.install(identity, pair, 'openlist', this.persist.checked, this.life.signal);
+        const persistent = this.account?.persistent ?? this.persist.checked;
+        await this.plugin.credentials.install(identity, pair, 'openlist', persistent, this.life.signal);
         this.plugin.service.cache.clear(); if (this.life.signal.aborted) return;
-        new Notice(`已连接 ${identity.label}`); this.close();
+        new Notice(`已连接 ${identity.label}`); this.close(); this.onSaved?.();
       } catch (e) { if (!this.life.signal.aborted) this.status.textContent = publicError(e); }
       finally { this.busy = false; if (!this.life.signal.aborted) this.controls(); }
     });
@@ -83,6 +96,10 @@ class AuthModal extends TrackedModal {
     this.status.textContent = '正在核验账号和根目录权限…';
     const identity = await this.plugin.provider.verify(candidate.pair.accessToken, this.life.signal);
     check(this.life.signal); if (this.candidate !== candidate) return;
+    if (this.account && identity.accountId !== this.account.accountId) {
+      this.candidate = null; clearTimeout(this.expiry);
+      fail('identity', '该授权属于其他账号，请重新授权原账号。');
+    }
     candidate.identity = identity;
     this.status.textContent = `已验证 ${identity.label}（账号 ${identity.accountId}）。请核对后保存。`;
   }
@@ -228,47 +245,284 @@ class Picker extends TrackedModal {
     super.onClose(); this.resolveResult?.(this.result || null); this.resolveResult = null; this.items = []; this.rowButtons = [];
   }
 }
+const ACCOUNT_STATES = {
+  connected: ['已有授权', 'ready'],
+  'renewal-due': ['下次访问时续期', 'notice'],
+  renewing: ['正在续期', 'notice'],
+  recovery: ['待恢复', 'warning']
+};
+
+function settingsSection(parent, title, description) {
+  const section = el(parent, 'section', undefined, {class: 'cr-settings-section'});
+  const head = el(section, 'div', undefined, {class: 'cr-settings-section-head'});
+  const intro = el(head, 'div');
+  el(intro, 'h3', title);
+  el(intro, 'p', description);
+  return {section, head};
+}
+
+function settingsFeedback(parent) {
+  return el(parent, 'p', '', {class: 'cr-settings-feedback', role: 'status', 'aria-live': 'polite'});
+}
+
+function showFeedback(element, text, tone = '') {
+  element.textContent = text;
+  element.setAttribute('data-tone', tone);
+}
+
 class SettingsTab extends PluginSettingTab {
-  constructor(plugin) { super(plugin.app, plugin); this.plugin = plugin; this.generation = 0; }
+  constructor(plugin) {
+    super(plugin.app, plugin);
+    this.plugin = plugin;
+    this.accountLoad = 0;
+    this.saving = false;
+  }
+
   display() {
-    const generation = ++this.generation, c = this.containerEl; c.replaceChildren();
-    el(c, 'h2', `Cloud Reference · ${this.plugin.manifest.version}`);
-    new Setting(c).setName('百度网盘授权').setDesc('隔离官方登录窗口；宿主不支持时可手动导入 OpenList 令牌。')
-      .addButton(b => b.setButtonText('连接账号').onClick(() => new AuthModal(this.plugin).open()));
-    new Setting(c).setName('动态显示真实文件名').setDesc('仅阅读视图可见链接按需查询；后台查询并发 2，排队上限 32。超出时保留原名称，悬停或点击可更新。')
-      .addToggle(t => t.setValue(this.plugin.settings.dynamicNames).onChange(async value => {
-        this.plugin.settings.dynamicNames = value; await this.plugin.saveData(this.plugin.settings);
-      }));
-    el(c, 'p', '不建立持久搜索索引，不自动下载，不扫描整个库。默认打开网盘位置；只有已注册的外部打开器可另设默认行为。', {class: 'cr-muted'});
-    new Setting(c).setName('性能诊断（无账号与路径）').setDesc('只读取计数，不触发网盘请求。')
-      .addButton(b => b.setButtonText('复制诊断').onClick(() => this.plugin.copy(JSON.stringify(this.plugin.diagnostics(), null, 2))));
-    const extension = input(c, '扩展名，例如 pdf'); const choices = el(c, 'select', undefined, {'aria-label': '默认打开器'});
-    el(choices, 'option', '在网盘定位', {value: 'web'});
-    for (const opener of this.plugin.service.openers.values()) el(choices, 'option', opener.label || opener.id, {value: opener.id});
-    button(c, '保存打开方式', async () => {
-      const key = extension.value.trim().replace(/^\./, '').toLowerCase();
-      if (!/^[a-z0-9]{1,12}$/.test(key)) fail('invalid', '请输入有效扩展名。');
-      if (!Object.hasOwn(this.plugin.settings.openers, key) && Object.keys(this.plugin.settings.openers).length >= 64) fail('limit', '最多保存 64 个扩展名规则。');
-      this.plugin.settings.openers[key] = choices.value; await this.plugin.saveData(this.plugin.settings); new Notice('已保存。');
+    this.hide();
+    this.view = new AbortController();
+    const c = this.containerEl;
+    c.replaceChildren();
+    const root = el(c, 'div', undefined, {class: 'cr-settings'});
+    const header = el(root, 'header', undefined, {class: 'cr-settings-header'});
+    const icon = el(header, 'span', undefined, {class: 'cr-settings-icon', 'aria-hidden': 'true'});
+    setIcon?.(icon, 'cloud');
+    const title = el(header, 'div', undefined, {class: 'cr-settings-title'});
+    el(title, 'h2', 'Cloud Reference');
+    el(title, 'p', '在 Obsidian 中浏览、搜索和引用百度网盘文件。');
+    el(header, 'span', `v${this.plugin.manifest.version}`, {class: 'cr-settings-version'});
+
+    this.renderAccounts(root, this.view.signal);
+    this.renderReferences(root);
+    this.renderDiagnostics(root);
+  }
+
+  renderAccounts(root, signal) {
+    const {section, head} = settingsSection(root, '账号与授权', '这里显示本地授权状态。选择「验证连接」检查网盘访问。');
+    const actions = el(head, 'div', undefined, {class: 'cr-settings-actions'});
+    const connect = button(actions, '连接百度网盘', () => new AuthModal(this.plugin, {onSaved: load}).open());
+    connect.classList.add('mod-cta');
+    const reload = button(actions, '刷新状态', () => load());
+    const panel = el(section, 'div', undefined, {class: 'cr-settings-panel'});
+    const list = el(panel, 'div', undefined, {class: 'cr-settings-account-list'});
+    const feedback = settingsFeedback(section);
+    const load = async () => {
+      if (signal.aborted || this.plugin.closed) return;
+      const request = ++this.accountLoad;
+      reload.disabled = true;
+      list.setAttribute('aria-busy', 'true');
+      showFeedback(feedback, '正在读取账号…');
+      try {
+        const accounts = await this.plugin.credentials.accountDetails();
+        if (signal.aborted || request !== this.accountLoad) return;
+        list.replaceChildren();
+        if (!accounts.length) el(list, 'p', '连接账号后，就可以在笔记中插入网盘引用。', {class: 'cr-settings-empty'});
+        for (const account of accounts) this.renderAccount(list, account, load, signal);
+        const invalid = this.plugin.storage.invalidCount;
+        showFeedback(feedback, invalid ? `${invalid} 个凭据文件无法读取。请检查同步冲突，或重新授权对应账号。` : '', invalid ? 'warning' : '');
+      } catch (error) {
+        if (!signal.aborted && request === this.accountLoad) showFeedback(feedback, publicError(error), 'error');
+      } finally {
+        if (!signal.aborted && request === this.accountLoad) {
+          reload.disabled = false;
+          list.setAttribute('aria-busy', 'false');
+        }
+      }
+    };
+    void load();
+  }
+
+  renderAccount(list, account, reload, signal) {
+    const row = el(list, 'div', undefined, {class: 'cr-settings-account'});
+    const head = el(row, 'div', undefined, {class: 'cr-settings-account-head'});
+    el(head, 'strong', account.label, {class: 'cr-settings-account-name'});
+    const [label, tone] = ACCOUNT_STATES[account.status];
+    const status = el(head, 'span', label, {class: 'cr-settings-status', 'data-tone': tone});
+    el(row, 'p', account.persistent ? '明文保存在此库，可随库同步' : '仅本次会话', {class: 'cr-settings-account-meta'});
+    const actions = el(row, 'div', undefined, {class: 'cr-settings-actions'});
+    button(actions, '浏览网盘', () => this.plugin.browseFolder(rootOf(account.accountId)));
+    const verify = button(actions, '验证连接', async () => {
+      if (verify.disabled || signal.aborted) return;
+      verify.disabled = true;
+      showFeedback(feedback, '正在验证账号和根目录访问…');
+      try {
+        await this.plugin.operation(signal, active =>
+          this.plugin.credentials.use(account.accountId, async token => {
+            const identity = await this.plugin.provider.verify(token, active);
+            if (identity.accountId !== account.accountId) fail('identity', '授权账号不匹配，请重新授权。');
+          }, active));
+        if (signal.aborted) return;
+        showFeedback(status, '连接正常', 'ready');
+        showFeedback(feedback, '已验证身份和根目录访问。', 'ready');
+      } catch (error) {
+        if (signal.aborted) return;
+        if (error.code === 'repair') showFeedback(status, '待恢复', 'warning');
+        else if (error.code === 'unauthorized' || error.code === 'identity') showFeedback(status, '需要重新授权', 'warning');
+        showFeedback(feedback, publicError(error), 'error');
+      } finally {
+        if (!signal.aborted) verify.disabled = false;
+      }
     });
-    const box = el(c, 'div'); el(box, 'h3', '已连接账号');
-    this.plugin.credentials.accounts().then(accounts => {
-      if (!box.isConnected || generation !== this.generation || this.plugin.closed) return;
-      if (this.plugin.storage.invalidCount) el(box, 'p', '部分凭据文件无效，请检查同步冲突；未影响其他有效账号。');
-      for (const account of accounts) {
-        const row = el(box, 'div', account.label, {class: 'cr-toolbar'});
-        button(row, '移除凭据', () => {
-          const confirm = new TrackedModal(this.plugin);
-          confirm.onOpen = () => {
-            el(confirm.contentEl, 'p', '移除会删除库内凭据并影响同步设备，但不撤销百度授权、不删除网盘文件。');
-            button(confirm.contentEl, '取消', () => confirm.close());
-            button(confirm.contentEl, '确认移除', async () => { await this.plugin.credentials.remove(account.accountId); this.plugin.service.cache.clear(); confirm.close(); this.display(); });
-          };
-          confirm.open();
+    button(actions, '重新授权', async () => {
+      const current = (await this.plugin.credentials.accountDetails()).find(item => item.accountId === account.accountId);
+      if (signal.aborted) return;
+      if (!current) { await reload(); return; }
+      new AuthModal(this.plugin, {account: current, onSaved: reload}).open();
+    });
+    button(actions, '移除凭据', () => {
+      const confirmation = new TrackedModal(this.plugin);
+      confirmation.onOpen = () => {
+        el(confirmation.contentEl, 'h2', `移除 ${account.label} 的凭据`);
+        el(confirmation.contentEl, 'p', '这会清除本次会话和此库中该账号的凭据，并可能影响同步设备。百度授权与网盘文件会保留。');
+        const controls = el(confirmation.contentEl, 'div', undefined, {class: 'cr-toolbar'});
+        button(controls, '取消', () => confirmation.close());
+        const remove = button(controls, '确认移除', async () => {
+          remove.disabled = true;
+          try {
+            await this.plugin.credentials.remove(account.accountId);
+            this.plugin.service.cache.clear();
+            confirmation.close();
+            await reload();
+          } finally { remove.disabled = false; }
+        });
+        remove.classList.add('mod-warning');
+      };
+      confirmation.open();
+    });
+    const feedback = settingsFeedback(row);
+  }
+
+  async saveSettings(change) {
+    if (this.saving) fail('busy', '设置正在保存，请稍后重试。');
+    this.saving = true;
+    try {
+      const next = {...this.plugin.settings, ...change};
+      await this.plugin.saveData(next);
+      Object.assign(this.plugin.settings, change);
+    } finally { this.saving = false; }
+  }
+
+  renderReferences(root) {
+    const {section} = settingsSection(root, '引用与打开方式', '在笔记中输入 /网盘 或 /cloud 选取资源，也可以直接复制引用。');
+    const panel = el(section, 'div', undefined, {class: 'cr-settings-panel'});
+    new Setting(panel).setName('选取网盘资源').setDesc('复制所选文件或目录的 Markdown 引用。')
+      .addButton(b => b.setButtonText('浏览并复制引用').onClick(async () => {
+        try {
+          const selected = await this.plugin.pick();
+          if (selected) await this.plugin.copy(markdownOf(selected));
+        } catch (error) { new Notice(publicError(error)); }
+      }));
+    new Setting(panel).setName('在阅读视图显示最新名称').setDesc('保留手动写的标题和笔记原文。')
+      .addToggle(t => t.setValue(this.plugin.settings.dynamicNames).onChange(async value => {
+        try { await this.saveSettings({dynamicNames: value}); }
+        catch (error) { t.setValue(this.plugin.settings.dynamicNames); new Notice(publicError(error)); }
+      }));
+
+    const rules = el(panel, 'div', undefined, {class: 'cr-settings-rule-list'});
+    const ruleHead = el(rules, 'div', undefined, {class: 'cr-settings-rule-head'});
+    const nativeClient = supportsBaiduClient();
+    el(ruleHead, 'h4', '扩展名规则');
+    el(ruleHead, 'p', nativeClient
+      ? '默认使用百度网盘客户端打开引用。请在客户端登录引用所属账号。客户端可预览常见文件，其他格式会定位到所在目录。'
+      : '文件默认在百度网盘网页定位所在目录。文件夹在 Obsidian 内打开。');
+    const rows = el(rules, 'div');
+    const form = el(rules, 'form', undefined, {class: 'cr-settings-rule-form'});
+    const extension = input(form, '扩展名');
+    extension.placeholder = '例如 pdf';
+    const selectLabel = el(form, 'label', undefined, {class: 'cr-field'});
+    el(selectLabel, 'span', '打开方式');
+    const choices = el(selectLabel, 'select');
+    const controls = el(form, 'div', undefined, {class: 'cr-settings-actions'});
+    const submit = el(controls, 'button', '添加规则', {class: 'mod-cta', type: 'submit'});
+    const cancel = button(controls, '取消编辑', () => edit());
+    const feedback = settingsFeedback(rules);
+    let editing;
+
+    const openers = () => new Map([
+      ...(nativeClient ? [[BAIDU_CLIENT, '百度网盘客户端']] : []),
+      ['web', '百度网盘网页定位'],
+      ...Array.from(this.plugin.service.openers.values(), item => [item.id, item.label || item.id])
+    ]);
+    const edit = (key, current = nativeClient ? BAIDU_CLIENT : 'web') => {
+      editing = key;
+      extension.value = key || '';
+      extension.readOnly = Boolean(key);
+      submit.textContent = key ? '保存规则' : '添加规则';
+      cancel.hidden = !key;
+      choices.replaceChildren();
+      const registered = openers();
+      for (const [id, label] of registered) el(choices, 'option', label, {value: id});
+      if (!registered.has(current)) el(choices, 'option', '原打开器未注册', {value: current, disabled: ''});
+      choices.value = current;
+      showFeedback(feedback, '');
+    };
+    const render = () => {
+      rows.replaceChildren();
+      const entries = Object.entries(this.plugin.settings.openers).sort(([a], [b]) => a.localeCompare(b));
+      if (!entries.length) el(rows, 'p', '还没有扩展名规则。', {class: 'cr-settings-empty'});
+      const registered = openers();
+      for (const [key, value] of entries) {
+        const row = el(rows, 'div', undefined, {class: 'cr-settings-rule'});
+        el(row, 'code', '.' + key, {class: 'cr-settings-extension'});
+        el(row, 'span', registered.get(value) || `未注册（${value}）`, {class: 'cr-settings-rule-target'});
+        const actions = el(row, 'div', undefined, {class: 'cr-settings-actions'});
+        button(actions, '编辑', () => { edit(key, value); choices.focus(); });
+        button(actions, '删除', async () => {
+          try {
+            const updated = Object.assign(Object.create(null), this.plugin.settings.openers);
+            delete updated[key];
+            await this.saveSettings({openers: updated});
+            if (editing === key) edit();
+            render();
+            showFeedback(feedback, '已删除规则。', 'ready');
+          } catch (error) { showFeedback(feedback, publicError(error), 'error'); }
         });
       }
-    }).catch(e => { if (box.isConnected && generation === this.generation) el(box, 'p', publicError(e)); });
+    };
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (submit.disabled) return;
+      submit.disabled = true;
+      try {
+        const key = extension.value.trim().replace(/^\./, '').toLowerCase();
+        if (!/^[a-z0-9]{1,12}$/.test(key)) fail('invalid', '请输入 1 至 12 位英文字母或数字作为扩展名。');
+        if (!openers().has(choices.value)) fail('opener', '请选择可用的打开方式。');
+        const updated = Object.assign(Object.create(null), this.plugin.settings.openers);
+        if (!editing && Object.hasOwn(updated, key)) fail('invalid', '此扩展名已有规则，请在列表中编辑。');
+        if (!editing && Object.keys(updated).length >= 64) fail('limit', '最多保存 64 个扩展名规则。');
+        updated[key] = choices.value;
+        await this.saveSettings({openers: updated});
+        edit();
+        render();
+        showFeedback(feedback, '已保存规则。', 'ready');
+      } catch (error) { showFeedback(feedback, publicError(error), 'error'); }
+      finally { submit.disabled = false; }
+    });
+    edit();
+    render();
   }
-  hide() { this.generation++; }
+
+  renderDiagnostics(root) {
+    const {section, head} = settingsSection(root, '诊断', '计数为当前会话快照。');
+    const actions = el(head, 'div', undefined, {class: 'cr-settings-actions'});
+    button(actions, '刷新计数', () => render());
+    button(actions, '复制诊断', () => this.plugin.copy(JSON.stringify(this.plugin.diagnostics(), null, 2)));
+    const metrics = el(section, 'dl', undefined, {class: 'cr-settings-metrics'});
+    const render = () => {
+      const {network, metadata, visibleNames} = this.plugin.diagnostics();
+      metrics.replaceChildren();
+      for (const [label, value] of [
+        ['网盘请求', network.requests], ['正在请求', network.active], ['等待请求', network.queued],
+        ['元数据缓存', metadata.entries], ['名称待更新', visibleNames.queued]
+      ]) {
+        const metric = el(metrics, 'div', undefined, {class: 'cr-settings-metric'});
+        el(metric, 'dt', label);
+        el(metric, 'dd', String(value));
+      }
+    };
+    render();
+  }
+
+  hide() { this.view?.abort(); }
 }
 module.exports = {AuthModal, Picker, SettingsTab, TrackedModal, rootOf, el, button, classify};

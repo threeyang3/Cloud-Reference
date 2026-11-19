@@ -15,3 +15,304 @@
 .cr-results[aria-busy=true]{opacity:.65}
 .cr-modal details{margin-block:1em}
 .cr-modal summary{cursor:pointer}
+
+.cr-settings {
+  --cr-settings-border: var(--background-modifier-border);
+  --cr-settings-muted: var(--text-muted);
+  --cr-settings-surface: var(--background-secondary);
+  --cr-settings-accent: var(--interactive-accent);
+  container: cr-settings / inline-size;
+  max-inline-size: 54rem;
+  color: var(--text-normal);
+  line-height: 1.5;
+}
+
+.cr-settings-header {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding-block: 0.25rem 1.25rem;
+  border-block-end: 1px solid var(--cr-settings-border);
+}
+
+.cr-settings-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  inline-size: 2.875rem;
+  block-size: 2.875rem;
+  border-radius: var(--radius-m, 8px);
+  background: color-mix(in srgb, var(--cr-settings-accent) 10%, var(--background-primary));
+  color: var(--text-accent);
+}
+
+.cr-settings-icon svg {
+  inline-size: 1.5rem;
+  block-size: 1.5rem;
+}
+
+.cr-settings-title {
+  min-inline-size: 0;
+}
+
+.cr-settings .cr-settings-title h2,
+.cr-settings .cr-settings-title p,
+.cr-settings .cr-settings-section-head h3,
+.cr-settings .cr-settings-section-head p {
+  margin: 0;
+}
+
+.cr-settings .cr-settings-title h2 {
+  font-size: 1.35rem;
+  line-height: 1.25;
+  font-weight: 670;
+}
+
+.cr-settings-version,
+.cr-settings-title p,
+.cr-settings-section-head p,
+.cr-settings-rule-head p,
+.cr-settings-account-meta,
+.cr-settings-empty {
+  color: var(--cr-settings-muted);
+  font-size: var(--font-small);
+  overflow-wrap: anywhere;
+}
+
+.cr-settings-version {
+  align-self: flex-start;
+  margin-inline-start: auto;
+  padding-block-start: 0.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.cr-settings-section {
+  display: grid;
+  gap: 0.875rem;
+  padding-block: 1.25rem;
+  min-inline-size: 0;
+}
+
+.cr-settings-section + .cr-settings-section {
+  border-block-start: 1px solid var(--cr-settings-border);
+}
+
+.cr-settings-section-head,
+.cr-settings-account-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  flex-wrap: wrap;
+}
+
+.cr-settings .cr-settings-section-head h3 {
+  font-size: 1rem;
+  line-height: 1.35;
+  font-weight: 650;
+}
+
+.cr-settings .cr-settings-section-head p {
+  margin-block-start: 0.25rem;
+}
+
+.cr-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.cr-settings-actions button {
+  margin: 0;
+}
+
+.cr-settings-actions button[hidden] {
+  display: none;
+}
+
+.cr-settings :where(button, select, input, [role="switch"]):focus-visible {
+  outline: 2px solid var(--cr-settings-accent);
+  outline-offset: 2px;
+}
+
+.cr-settings-account-list {
+  border: 1px solid var(--cr-settings-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--cr-settings-surface);
+}
+
+.cr-settings-account {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.875rem 1rem;
+  min-inline-size: 0;
+}
+
+.cr-settings-account + .cr-settings-account {
+  border-block-start: 1px solid var(--cr-settings-border);
+}
+
+.cr-settings-account-name {
+  min-inline-size: 0;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.cr-settings-account-meta,
+.cr-settings-feedback,
+.cr-settings-empty {
+  margin: 0;
+}
+
+.cr-settings-account .cr-settings-actions {
+  margin-block-start: 0.25rem;
+}
+
+.cr-settings-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--cr-settings-muted);
+  font-size: var(--font-small);
+  font-weight: 550;
+}
+
+.cr-settings-status::before {
+  content: "";
+  inline-size: 0.375rem;
+  block-size: 0.375rem;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.cr-settings :is(.cr-settings-status, .cr-settings-feedback)[data-tone="ready"] {
+  color: var(--text-success, var(--color-green));
+}
+
+.cr-settings :is(.cr-settings-status, .cr-settings-feedback)[data-tone="notice"] {
+  color: var(--text-accent);
+}
+
+.cr-settings :is(.cr-settings-status, .cr-settings-feedback)[data-tone="warning"] {
+  color: var(--text-warning, var(--color-orange));
+}
+
+.cr-settings :is(.cr-settings-status, .cr-settings-feedback)[data-tone="error"] {
+  color: var(--text-error);
+}
+
+.cr-settings-account-list > .cr-settings-empty {
+  padding: 0.875rem 1rem;
+}
+
+.cr-settings-feedback {
+  color: var(--cr-settings-muted);
+  font-size: var(--font-small);
+  overflow-wrap: anywhere;
+}
+
+.cr-settings-feedback:not(:empty) {
+  margin-block-start: 0.375rem;
+}
+
+.cr-settings .setting-item {
+  padding-block: 0.625rem;
+}
+
+.cr-settings-rule-list {
+  display: grid;
+  gap: 0.625rem;
+  margin-block-start: 0.875rem;
+}
+
+.cr-settings .cr-settings-rule-head h4,
+.cr-settings .cr-settings-rule-head p {
+  margin: 0;
+}
+
+.cr-settings .cr-settings-rule-head h4 {
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.cr-settings .cr-settings-rule-head p {
+  margin-block-start: 0.25rem;
+}
+
+.cr-settings-rule {
+  display: grid;
+  grid-template-columns: minmax(3.25rem, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem 0.875rem;
+  padding-block: 0.65rem;
+  border-block-start: 1px solid var(--cr-settings-border);
+}
+
+.cr-settings-extension {
+  font-family: var(--font-monospace);
+  font-size: var(--font-small);
+}
+
+.cr-settings-rule-target {
+  min-inline-size: 0;
+  color: var(--cr-settings-muted);
+  overflow-wrap: anywhere;
+}
+
+.cr-settings-rule-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.cr-settings-rule-form :is(.cr-field, label) {
+  min-inline-size: 0;
+  margin: 0;
+}
+
+.cr-settings-rule-form :is(input, select) {
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.cr-settings-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(7.75rem, 100%), 1fr));
+  gap: 0.75rem 1rem;
+  margin: 0;
+  padding-block: 0.75rem;
+  border-block-start: 1px solid var(--cr-settings-border);
+}
+
+.cr-settings-metric dt {
+  color: var(--cr-settings-muted);
+  font-size: var(--font-small);
+}
+
+.cr-settings-metric dd {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+@container cr-settings (max-width: 30rem) {
+  .cr-settings-rule {
+    grid-template-columns: minmax(3.25rem, auto) minmax(0, 1fr);
+  }
+
+  .cr-settings-rule .cr-settings-actions {
+    grid-column: 1 / -1;
+  }
+
+  .cr-settings-rule-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cr-settings-rule-form > .cr-settings-actions {
+    justify-self: start;
+  }
+}

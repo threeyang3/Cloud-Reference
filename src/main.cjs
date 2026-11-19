@@ -10,6 +10,7 @@ const {BaiduProvider}=require('./baidu.cjs');
 const {CloudService}=require('./service.cjs');
 const {reference,parseLink,markdownOf,webLocation,handoff,publicError,fail}=require('./reference.cjs');
 const {check,waitFor,NameScheduler}=require('./runtime.cjs');
+const {BAIDU_CLIENT,supportsBaiduClient,baiduClientTarget,launchBaiduClient}=require('./native.cjs');
 const {AuthModal,Picker,SettingsTab}=require('./ui.cjs');
 class SlashSuggest extends EditorSuggest{
   constructor(plugin){super(plugin.app);this.plugin=plugin;}
@@ -67,16 +68,42 @@ module.exports=class CloudReference extends Plugin{
     if(options.signal?.aborted)return Promise.resolve(null);
     return new Promise(resolve=>{const modal=new Picker(this,options,resolve);modal.open();if(options.signal?.aborted)modal.close();});
   }
-  async open(input,options={}){
-    const ref=typeof input==='string'?parseLink(input):reference(input);
-    if(ref.kind==='folder'&&!options.opener){const picked=await this.pick({folder:ref,signal:options.signal,intent:'browse'});if(picked)await this.open(picked,options);return;}
-    return this.operation(options.signal,async signal=>{
-      if(options.opener&&options.opener!=='web')return this.service.openWith(options.opener,ref,{signal});
-      const current=await this.service.resolve(ref,{signal,fresh:true});check(signal);
-      const ext=current.name.includes('.')?current.name.split('.').pop().toLowerCase():'';
-      const opener=options.opener||(Object.hasOwn(this.settings.openers,ext)?this.settings.openers[ext]:'web');
-      if(opener!=='web')return this.service.openResolvedWith(opener,current,{signal});
-      new Notice('请确认浏览器登录的是此资源所属的百度账号。');return this.external(webLocation(current));
+  async browseFolder(input, {signal} = {}) {
+    const ref = typeof input === 'string' ? parseLink(input) : reference(input);
+    if (ref.kind !== 'folder') fail('invalid', '资源不是目录。');
+    const picked = await this.pick({folder: ref, signal, intent: 'browse'});
+    if (picked) await this.open(picked, {signal});
+  }
+  supportsBaiduClient() { return supportsBaiduClient(); }
+  launchBaiduClient(url, options) { return launchBaiduClient(url, options); }
+  async open(input, options = {}) {
+    const ref = typeof input === 'string' ? parseLink(input) : reference(input);
+    const native = this.supportsBaiduClient();
+    if (ref.kind === 'folder' && !options.opener && !native) {
+      return this.browseFolder(ref, {signal: options.signal});
+    }
+    return this.operation(options.signal, async signal => {
+      if (options.opener && options.opener !== 'web' && options.opener !== BAIDU_CLIENT) {
+        return this.service.openWith(options.opener, ref, {signal});
+      }
+      const current = await this.service.resolve(ref, {signal, fresh: true});
+      check(signal);
+      const ext = current.name.includes('.') ? current.name.split('.').pop().toLowerCase() : '';
+      const fallback = native ? BAIDU_CLIENT : 'web';
+      const opener = options.opener || (ref.kind === 'file' && Object.hasOwn(this.settings.openers, ext) ?
+        this.settings.openers[ext] : fallback);
+      if (opener === BAIDU_CLIENT) {
+        if (!native) fail('platform', '当前平台尚未支持百度网盘客户端打开。');
+        const {url, previewsFile} = baiduClientTarget(current);
+        await this.launchBaiduClient(url, {signal});
+        check(signal);
+        const target = ref.kind === 'file' && !previewsFile ? '文件所在目录' : '资源';
+        new Notice(`已请求百度网盘客户端打开${target}。请确认客户端登录的是此资源所属账号。`);
+        return;
+      }
+      if (opener !== 'web') return this.service.openResolvedWith(opener, current, {signal});
+      new Notice('请确认浏览器登录的是此资源所属的百度账号。');
+      return this.external(webLocation(current));
     });
   }
   async authorize(options={}){
@@ -89,8 +116,10 @@ module.exports=class CloudReference extends Plugin{
   async copy(value){if(this.closed)fail('unloaded','插件已停用。');await navigator.clipboard.writeText(value);new Notice('已复制。');}
   menu(input,event){
     const ref=reference(input),menu=new Menu();const action=(label,fn)=>menu.addItem(i=>i.setTitle(label).onClick(()=>Promise.resolve().then(fn).catch(e=>new Notice(publicError(e)))));
-    action(ref.kind==='folder'?'浏览目录':'按默认方式打开',()=>this.open(ref));
-    action('在网盘定位（查询最新路径）',()=>this.open(ref,{opener:'web'}));
+    if (ref.kind === 'file') action('按默认方式打开', () => this.open(ref));
+    if (this.supportsBaiduClient()) action('在百度网盘客户端打开', () => this.open(ref, {opener: BAIDU_CLIENT}));
+    if (ref.kind === 'folder') action('在 Obsidian 浏览目录', () => this.browseFolder(ref));
+    action('在网盘网页定位（查询最新路径）',()=>this.open(ref,{opener:'web'}));
     action('复制 Markdown 引用',()=>this.copy(markdownOf(ref)));
     action('复制保存的路径',()=>this.copy(ref.path));
     action('打开保存路径（未核验，可能已失效）',()=>this.external(webLocation(ref)));
