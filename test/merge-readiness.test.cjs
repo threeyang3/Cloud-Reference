@@ -86,6 +86,8 @@ test('repeated unload emits exactly one lifecycle notification', async t => {
 });
 test('default opener uses freshly resolved extension with only one metadata request', async t => {
   const {plugin} = fixture(t); await plugin.onload(); let queries = 0, opened;
+  plugin.supportsBaiduClient = () => true;
+  plugin.launchBaiduClient = () => { throw Error('wrong opener'); };
   plugin.settings.openers.pdf = 'pdf-reader'; plugin.settings.openers.mp4 = 'video-reader';
   plugin.provider.stat = async () => { queries++; return {...ref, name: 'new.mp4', path: '/renamed/new.mp4'}; };
   plugin.service.registerOpener({id: 'pdf-reader', canOpen: r => r.name.endsWith('.pdf'), open() { throw Error('wrong opener'); }});
@@ -94,9 +96,59 @@ test('default opener uses freshly resolved extension with only one metadata requ
 });
 test('extension named constructor does not resolve through Object.prototype', async t => {
   const {plugin} = fixture(t); await plugin.onload(); let destination;
+  plugin.supportsBaiduClient = () => false;
   const item = {...ref, name: 'file.constructor', path: '/file.constructor'};
   plugin.provider.stat = async () => item; plugin.external = async url => { destination = url; };
   await plugin.open(item); assert.match(destination, /^https:\/\/pan\.baidu\.com\//);
+});
+test('macOS file and folder defaults dispatch the updated location to Baidu Netdisk', async t => {
+  const {plugin} = fixture(t);
+  await plugin.onload();
+  plugin.supportsBaiduClient = () => true;
+  const launches = [];
+  plugin.launchBaiduClient = (url, {signal}) => {
+    assert.equal(signal.aborted, false);
+    const value = url.split('?param=')[1];
+    launches.push(JSON.parse(Buffer.from(value, 'base64').toString('utf8')));
+  };
+  plugin.external = () => { throw Error('unexpected web launch'); };
+  plugin.pick = () => { throw Error('unexpected Obsidian picker'); };
+  let resolves = 0;
+  plugin.provider.stat = async entry => {
+    resolves++;
+    return {...entry, path: '/moved/' + entry.name};
+  };
+  await plugin.open(ref);
+  await plugin.open({...ref, kind: 'folder', name: 'folder', path: '/folder'});
+  assert.equal(resolves, 2);
+  assert.equal(launches[0].fs_id, ref.fileId);
+  assert.equal(launches[0].path, '/moved/old.pdf');
+  assert.deepEqual(launches[1], {path: '/moved/folder', is_dir: 1});
+});
+test('failed native launch does not redirect, while an explicit web opener remains available', async t => {
+  const {plugin} = fixture(t);
+  await plugin.onload();
+  plugin.supportsBaiduClient = () => true;
+  plugin.provider.stat = async entry => entry;
+  plugin.launchBaiduClient = async () => { throw Error('fixture missing client'); };
+  const launches = [];
+  plugin.external = async url => { launches.push(url); };
+  await assert.rejects(plugin.open(ref), /fixture missing client/);
+  assert.deepEqual(launches, []);
+  await plugin.open(ref, {opener: 'web'});
+  assert.match(launches[0], /^https:\/\/pan\.baidu\.com\//);
+});
+test('the explicit Obsidian folder picker remains independent of the client default', async t => {
+  const {plugin} = fixture(t);
+  await plugin.onload();
+  plugin.supportsBaiduClient = () => true;
+  const folder = {...ref, kind: 'folder', name: 'folder', path: '/folder'};
+  const active = new AbortController();
+  const picks = [];
+  plugin.pick = async options => { picks.push(options); return null; };
+  plugin.launchBaiduClient = () => { throw Error('unexpected app launch'); };
+  await plugin.browseFolder(folder, {signal: active.signal});
+  assert.deepEqual(picks, [{folder: {...folder, v: 1}, signal: active.signal, intent: 'browse'}]);
 });
 test('external opener receives a frozen credential-free identity', async () => {
   const service = new CloudService({stat: async () => ({...ref, accessToken: 'fixture-not-public'})});

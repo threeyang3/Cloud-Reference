@@ -12,8 +12,16 @@ class Element{
 }
 const doc={createElement:tag=>new Element(tag,doc)};
 class Modal{constructor(){this.contentEl=new Element('div',doc);}close(){this.onClose();}open(){this.onOpen();}}
-let Picker;const original=Module._load;
-try{Module._load=function(id,...args){return id==='obsidian'?{Modal,PluginSettingTab:class{},Setting:class{},Notice:class{}}:original.call(this,id,...args);};({Picker}=require('../src/ui.cjs'));}finally{Module._load=original;}
+class PluginSettingTab { constructor() { this.containerEl = doc.createElement('div'); } }
+class Setting {
+  setName() { return this; }
+  setDesc() { return this; }
+  addButton() { return this; }
+  addToggle() { return this; }
+}
+let Picker, AuthModal, SettingsTab;
+const original=Module._load;
+try{Module._load=function(id,...args){return id==='obsidian'?{Modal,PluginSettingTab,Setting,Notice:class{}}:original.call(this,id,...args);};({Picker, AuthModal, SettingsTab}=require('../src/ui.cjs'));}finally{Module._load=original;}
 const root={provider:'baidu',accountId:'123',fileId:'0',kind:'folder',name:'我的网盘',path:'/'};
 const file={...root,fileId:'2',kind:'file',name:'x.pdf',path:'/x.pdf',size:20};
 const tick=()=>new Promise(r=>setImmediate(r));
@@ -48,7 +56,6 @@ test('closing repeated picker instances leaves no modal registrations',async()=>
   const {plugin}=fixture();plugin.modals.clear();for(let i=0;i<100;i++){const p=new Picker(plugin,{},()=>{});await p.render();p.close();}assert.equal(plugin.modals.size,0);
 });
 
-let AuthModal;try{Module._load=function(id,...args){return id==='obsidian'?{Modal,PluginSettingTab:class{},Setting:class{},Notice:class{}}:original.call(this,id,...args);};({AuthModal}=require('../src/ui.cjs'));}finally{Module._load=original;}
 test('obtained credentials survive a transient account verification error without refreshing twice',async()=>{
   let acquired=0,verified=0;const plugin={app:{},modals:new Set(),provider:{verify:async()=>{if(++verified===1)throw Error('network');return {accountId:'1',label:'Fixture'};}}};
   const modal=new AuthModal(plugin);modal.onOpen();await modal.obtain(async()=>{acquired++;return {accessToken:'a',refreshToken:'r',expiresAt:null};});
@@ -59,4 +66,104 @@ test('closing authorization during verification never enables saving a late resu
   let release;const plugin={app:{},modals:new Set(),provider:{verify:()=>new Promise(r=>release=r)}};
   const modal=new AuthModal(plugin);modal.onOpen();const pending=modal.obtain(async()=>({accessToken:'a',refreshToken:'r',expiresAt:null}));await tick();modal.close();
   release({accountId:'1',label:'Fixture'});await pending;assert.equal(modal.candidate,null);assert.equal(plugin.modals.size,0);
+});
+
+test('targeted reauthorization discards a different account and retains the selected storage mode', async () => {
+  const installs = [];
+  let verifiedAccountId = '2';
+  const plugin = {app: {}, modals: new Set(),
+    provider: {verify: async () => ({accountId: verifiedAccountId, label: 'Fixture'})},
+    credentials: {install: async (identity, _pair, _profile, persistent) => installs.push([identity.accountId, persistent])},
+    service: {cache: {clear() {}}}};
+  const pair = {accessToken: 'a', refreshToken: 'r', expiresAt: null};
+  const modal = new AuthModal(plugin, {account: {accountId: '1', label: 'Fixture', persistent: true}});
+  modal.open();
+  await modal.obtain(async () => pair);
+  assert.equal(modal.save.disabled, true);
+  assert.equal(modal.candidate, null);
+  assert.match(modal.status.textContent, /其他账号/);
+  verifiedAccountId = '1';
+  await modal.obtain(async () => pair);
+  assert.equal(modal.save.disabled, false);
+  modal.save.handlers.click[0]();
+  await tick();
+  assert.deepEqual(installs, [['1', true]]);
+  assert.equal(plugin.modals.size, 0);
+});
+
+function descendants(root) { return root.children.flatMap(child => [child, ...descendants(child)]); }
+function findText(root, text) { return descendants(root).find(node => node.textContent === text); }
+function settingsFixture() {
+  const calls = [];
+  const plugin = {app: {}, manifest: {version: 'test'},
+    settings: {dynamicNames: true, openers: Object.create(null)},
+    storage: {invalidCount: 0}, service: {openers: new Map()},
+    diagnostics: () => ({network: {requests: 0}, metadata: {entries: 0}, visibleNames: {queued: 0}}),
+    saveData: async data => { calls.push(data); },
+    credentials: {
+      accountDetails: async () => [{accountId: '1', label: 'Fixture account', persistent: false, status: 'connected'}],
+      use: async (_id, verify) => verify('fixture-token')
+    },
+    operation: (signal, action) => action(signal),
+    provider: {verify: async () => { calls.push('verify'); return {accountId: '1'}; }}
+  };
+  const tab = new SettingsTab(plugin);
+  return {tab, plugin, calls, container: tab.containerEl};
+}
+
+test('settings reads authorization locally and verifies root access only when asked', async () => {
+  const {tab, calls, container} = settingsFixture();
+  tab.display();
+  await tick();
+  assert.deepEqual(calls, []);
+  assert.ok(findText(container, 'Fixture account'));
+  assert.ok(findText(container, '已有授权'));
+  assert.ok(findText(container, '仅本次会话'));
+  findText(container, '验证连接').handlers.click[0]();
+  await tick();
+  assert.deepEqual(calls, ['verify']);
+  assert.ok(findText(container, '连接正常'));
+  tab.hide();
+});
+
+test('settings browse stays in Obsidian and offers the native opener on macOS', async () => {
+  const {tab, plugin, calls, container} = settingsFixture();
+  plugin.browseFolder = async ref => calls.push([ref.kind, ref.accountId, ref.path]);
+  tab.display();
+  await tick();
+
+  findText(container, '浏览网盘').handlers.click[0]();
+  await tick();
+  assert.deepEqual(calls, [['folder', '1', '/']]);
+
+  const form = descendants(container).find(node => node.tag === 'form');
+  const choices = descendants(form).find(node => node.tag === 'select');
+  const openerIds = choices.children.map(option => option.value);
+  const mac = process.platform === 'darwin';
+  assert.deepEqual(openerIds, mac ? ['baidu-client', 'web'] : ['web']);
+  assert.equal(choices.value, mac ? 'baidu-client' : 'web');
+  tab.hide();
+});
+
+test('settings displays a missing opener and changes its rule only after saving succeeds', async () => {
+  const {tab, plugin, container} = settingsFixture();
+  plugin.settings.openers.pdf = 'fixture-missing';
+  tab.display();
+  await tick();
+  assert.ok(findText(container, '未注册（fixture-missing）'));
+  findText(container, '编辑').handlers.click[0]();
+  await tick();
+  const form = descendants(container).find(node => node.tag === 'form');
+  const choices = descendants(form).find(node => node.tag === 'select');
+  const submit = form.handlers.submit[0];
+  choices.value = 'web';
+  const save = plugin.saveData;
+  plugin.saveData = async () => { throw Error('fixture save failure'); };
+  await submit({preventDefault() {}});
+  assert.equal(plugin.settings.openers.pdf, 'fixture-missing');
+  plugin.saveData = save;
+  await submit({preventDefault() {}});
+  assert.equal(plugin.settings.openers.pdf, 'web');
+  assert.ok(findText(container, '已保存规则。'));
+  tab.hide();
 });

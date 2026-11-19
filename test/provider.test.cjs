@@ -35,8 +35,10 @@ test('disabled opener cannot run after a pending resource resolution',async()=>{
   const remove=s.registerOpener({id:'reader',canOpen:()=>true,open:()=>{called=true;}}),p=s.openWith('reader',folder);
   await new Promise(r=>setImmediate(r));remove();release(folder);await assert.rejects(p);assert.equal(called,false);s.close();
 });
-test('the web opener name is reserved and disposal blocks registration',()=>{
-  const s=new CloudService({});assert.throws(()=>s.registerOpener({id:'web',canOpen:()=>true,open(){}}));s.close();assert.throws(()=>s.registerOpener({id:'reader',canOpen:()=>true,open(){}}));
+test('the built-in opener names are reserved and disposal blocks registration',()=>{
+  const s=new CloudService({});
+  for (const id of ['web', 'baidu-client']) assert.throws(()=>s.registerOpener({id,canOpen:()=>true,open(){}}));
+  s.close();assert.throws(()=>s.registerOpener({id:'reader',canOpen:()=>true,open(){}}));
 });
 test('per-item missing metadata is reported as not-found before shape validation',async()=>{
   const {p}=provider([{errno:0,list:[{fs_id:'100',errno:-9}]}]);await assert.rejects(p.stat(folder),e=>e.code==='not-found');

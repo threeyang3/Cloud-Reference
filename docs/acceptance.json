@@ -1,11 +1,11 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "channel": "release-candidate",
   "gates": [
     {
       "id": "baidu-live-auth",
-      "status": "not-run",
-      "evidence": ""
+      "status": "partial",
+      "evidence": "docs/VALIDATION.md#023-本机实测"
     },
     {
       "id": "baidu-live-search",
@@ -19,8 +19,8 @@
     },
     {
       "id": "obsidian-macos",
-      "status": "not-run",
-      "evidence": ""
+      "status": "partial",
+      "evidence": "docs/VALIDATION.md#023-本机实测"
     },
     {
       "id": "obsidian-windows",

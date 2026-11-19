@@ -2,6 +2,7 @@
 const {randomUUID} = require('node:crypto');
 const {CloudError, decimalId, fail, text} = require('./reference.cjs');
 const {check, waitFor} = require('./runtime.cjs');
+const RENEWAL_WINDOW_MS = 30000;
 function token(value) {
   if (!text(value, 4096) || /[^\x21-\x7e]/.test(value)) fail('credential', '授权凭据格式无效。');
   return value;
@@ -83,15 +84,37 @@ class Credentials {
     try { await this.write(record, persistent, signal); if (persistent) this.sessions.delete(record.accountId); return record; }
     finally { this.mutations.delete(record.accountId); }
   }
-  async accounts() {
+  async #accountRecords() {
     check(this.lifetime.signal);
     const result = new Map();
-    for (const record of await this.storage.list()) {
-      try { const r = validateRecord(record, record.accountId); result.set(r.accountId, {accountId: r.accountId, label: r.label}); } catch { /* A corrupt account does not hide other accounts. */ }
-    }
+    const records = await this.storage.list();
     check(this.lifetime.signal);
-    for (const r of this.sessions.values()) result.set(r.accountId, {accountId: r.accountId, label: r.label});
+    for (const record of records) {
+      try {
+        const validated = validateRecord(record, record.accountId);
+        result.set(validated.accountId, {record: validated, persistent: true});
+      } catch { /* A corrupt account does not hide other accounts. */ }
+    }
+    for (const record of this.sessions.values()) result.set(record.accountId, {record, persistent: false});
     return [...result.values()];
+  }
+  async accounts() {
+    const records = await this.#accountRecords();
+    check(this.lifetime.signal);
+    return records.map(({record: {accountId, label}}) => ({accountId, label}));
+  }
+  async accountDetails() {
+    const records = await this.#accountRecords();
+    check(this.lifetime.signal);
+    const renewalDeadline = this.now() + RENEWAL_WINDOW_MS;
+    return records.map(({record, persistent}) => {
+      const {accountId, label, pending, expiresAt} = record;
+      let status = 'connected';
+      if (this.flights.has(accountId)) status = 'renewing';
+      else if (pending) status = 'recovery';
+      else if (expiresAt !== null && expiresAt <= renewalDeadline) status = 'renewal-due';
+      return {accountId, label, persistent, status};
+    });
   }
   async use(id, operation, signal) {
     check(signal); id = decimalId(id);
@@ -101,7 +124,7 @@ class Credentials {
       if (this.flights.has(id)) record = await waitFor(this.flights.get(id), signal);
       else fail('repair', '凭据正在其他设备续期或上次续期中断；同步完成后重试，必要时重新授权。');
     }
-    if (record.expiresAt !== null && record.expiresAt <= this.now() + 30000) record = await this.refresh(id, record, signal);
+    if (record.expiresAt !== null && record.expiresAt <= this.now() + RENEWAL_WINDOW_MS) record = await this.refresh(id, record, signal);
     check(signal);
     try { return await operation(record.accessToken); }
     catch (error) {

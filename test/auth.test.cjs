@@ -15,6 +15,51 @@ test('older refresh completion never overwrites newer synchronized record',async
 test('failure after successful refresh response retains pending marker on disk',async()=>{const {credentials:c,map,storage}=fixture();await c.install(identity,pair,'openlist',true);const normal=storage.write;storage.write=async(id,r)=>{if(!r.pending)throw Error('disk full');return normal(id,r);};await assert.rejects(c.refresh('123',await c.load('123')));assert.ok(map.get('123').pending);});
 test('cancelled waiter does not interrupt credential rotation commit',async()=>{let release;const {credentials:c,map}=fixture(()=>new Promise(r=>release=r));await c.install(identity,pair,'openlist',true);const controller=new AbortController(),p=c.refresh('123',await c.load('123'),controller.signal);await tick();controller.abort();await assert.rejects(p);release({accessToken:'new',refreshToken:'new-refresh',expiresAt:null});await tick();assert.equal(map.get('123').accessToken,'new');assert.equal(map.get('123').pending,undefined);});
 test('account listing exposes no tokens',async()=>{const {credentials:c}=fixture();await c.install(identity,pair,'openlist',true);assert.deepEqual(await c.accounts(),[identity]);});
+test('account details show the effective storage and renewal deadline without exposing the record', async () => {
+  const {credentials, map} = fixture();
+  credentials.now = () => 100000;
+  const due = {accountId: '456', label: '即将到期'};
+  const connected = {accountId: '789', label: '仍有效'};
+  const session = {...identity, label: '会话账号'};
+  await credentials.install(identity, pair, 'openlist', true);
+  await credentials.install(due, {...pair, expiresAt: 130000}, 'openlist', true);
+  await credentials.install(connected, {...pair, expiresAt: 130001}, 'openlist', true);
+  await credentials.install(session, pair, 'openlist', false);
+  map.set('999', {accountId: '999'});
+
+  assert.deepEqual(await credentials.accounts(), [session, due, connected]);
+  assert.deepEqual(await credentials.accountDetails(), [
+    {...session, persistent: false, status: 'connected'},
+    {...due, persistent: true, status: 'renewal-due'},
+    {...connected, persistent: true, status: 'connected'}
+  ]);
+});
+test('account details distinguish ongoing renewal from a recovery marker without retrying', async () => {
+  let rejectRenewal;
+  const {credentials, map} = fixture(() => new Promise((_, reject) => { rejectRenewal = reject; }));
+  await credentials.install(identity, pair, 'openlist', true);
+  const renewal = credentials.refresh(identity.accountId, await credentials.load(identity.accountId));
+  const rejection = assert.rejects(renewal, {code: 'network'});
+  await tick();
+
+  assert.ok(map.get(identity.accountId).pending);
+  assert.deepEqual(await credentials.accountDetails(), [{...identity, persistent: true, status: 'renewing'}]);
+  rejectRenewal(new CloudError('network', 'fixture failed after dispatch'));
+  await rejection;
+  assert.deepEqual(await credentials.accountDetails(), [{...identity, persistent: true, status: 'recovery'}]);
+  assert.ok(map.get(identity.accountId).pending);
+});
+test('closing credentials during the local account scan prevents a late details result', async () => {
+  const {credentials, storage, map} = fixture();
+  await credentials.install(identity, pair, 'openlist', true);
+  let finishScan;
+  storage.list = () => new Promise(resolve => { finishScan = resolve; });
+  const result = credentials.accountDetails();
+  const rejection = assert.rejects(result, {code: 'cancelled'});
+  credentials.close();
+  finishScan([...map.values()]);
+  await rejection;
+});
 test('permanent unauthorized response has a one-retry ceiling',async()=>{let n=0;const {credentials:c}=fixture();await c.install(identity,pair,'openlist',true);await assert.rejects(c.use('123',async()=>{n++;throw new CloudError('unauthorized','expired');}));assert.equal(n,2);});
 test('OpenList renewal request has fixed endpoint and redacts failures',async()=>{let seen;const auth=new OpenListAuth({json:async u=>{seen=u;return {access_token:'new',refresh_token:'renew',expires_in:3600};}});const out=await auth.renew('secret');assert.equal(seen.origin,'https://api.oplist.org');assert.equal(seen.pathname,'/baiduyun/renewapi');assert.equal(seen.searchParams.get('driver_txt'),'baiduyun_go');assert.equal(out.refreshToken,'renew');assert.ok(out.expiresAt>Date.now());});
 
